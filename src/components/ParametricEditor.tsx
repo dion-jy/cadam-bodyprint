@@ -17,6 +17,11 @@ import { ViewerSection } from '@/components/viewer/ViewerSection';
 import { ParameterSection } from '@/components/parameter/ParameterSection';
 import { useBlob } from '@/contexts/BlobContext';
 import { useColor } from '@/contexts/ColorContext';
+import { AssemblyProvider } from '@/contexts/AssemblyProvider';
+import { AssemblyPanel } from '@/components/assembly/AssemblyPanel';
+import { AssemblyToggle } from '@/components/assembly/AssemblyToggle';
+import { useAssembly } from '@/contexts/AssemblyContext';
+import { useAssemblyRenderer } from '@/hooks/useAssemblyRenderer';
 
 const PANEL_SIZES = {
   CHAT: {
@@ -36,10 +41,21 @@ const PANEL_SIZES = {
 } as const;
 
 export function ParametricEditor() {
+  const { compileScadToBlob } = useAssemblyRenderer();
+
+  return (
+    <AssemblyProvider compileScadToBlob={compileScadToBlob}>
+      <ParametricEditorInner />
+    </AssemblyProvider>
+  );
+}
+
+function ParametricEditorInner() {
   const { conversation } = useConversation();
   const { currentMessage, setCurrentMessage } = useCurrentMessage();
   const { setBlob } = useBlob();
   const { setColor } = useColor();
+  const { state: assemblyState } = useAssembly();
   const [isParametersPanelCollapsed, setIsParametersPanelCollapsed] =
     useState(false);
   const [isChatCollapsed, setIsChatCollapsed] = useState(false);
@@ -193,16 +209,23 @@ export function ParametricEditor() {
     }
   }, []);
 
+  const showAssemblyPanel = assemblyState.isAssemblyMode;
+
   return (
     <div
-      className="flex h-full w-full overflow-hidden bg-[#292828]"
+      className="flex h-full w-full flex-col overflow-hidden bg-[#292828]"
       ref={setContainerRef}
     >
+      {/* Assembly mode toggle bar */}
+      <div className="flex items-center justify-center border-b border-adam-neutral-700 py-1.5">
+        <AssemblyToggle />
+      </div>
       <PanelGroup
-        key={hasArtifact ? 'with-params' : 'no-params'}
+        key={`${hasArtifact ? 'with-params' : 'no-params'}-${showAssemblyPanel ? 'asm' : 'single'}`}
         direction="horizontal"
         className="h-full w-full"
       >
+        {/* Left panel: Chat (single mode) or Assembly Panel (assembly mode) */}
         <Panel
           collapsible
           ref={chatPanelRef}
@@ -213,7 +236,11 @@ export function ParametricEditor() {
           order={0}
         >
           <div className="relative h-full">
-            <ChatSection messages={currentMessageBranch ?? []} />
+            {showAssemblyPanel ? (
+              <AssemblyPanel />
+            ) : (
+              <ChatSection messages={currentMessageBranch ?? []} />
+            )}
           </div>
         </Panel>
         <PanelResizeHandle className="resize-handle group relative">
