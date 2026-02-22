@@ -42,3 +42,7 @@ verify_jwt = true
 [functions.prompt-generator]
 enabled = true
 verify_jwt = true
+
+[functions.orchestrate]
+enabled = true
+verify_jwt = false
