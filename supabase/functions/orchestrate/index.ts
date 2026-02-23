@@ -2,8 +2,25 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
 import { corsHeaders } from '../_shared/cors.ts';
 import 'jsr:@std/dotenv/load';
 
+const ANTHROPIC_OAUTH_TOKEN = Deno.env.get('ANTHROPIC_OAUTH_TOKEN') ?? '';
 const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY') ?? '';
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
+
+function getAuthHeaders(): Record<string, string> {
+  if (ANTHROPIC_OAUTH_TOKEN) {
+    return {
+      'Authorization': `Bearer ${ANTHROPIC_OAUTH_TOKEN}`,
+      'anthropic-version': '2023-06-01',
+      'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14',
+      'user-agent': 'claude-cli/2.1.2 (external, cli)',
+      'x-app': 'cli',
+    };
+  }
+  return {
+    'x-api-key': ANTHROPIC_API_KEY,
+    'anthropic-version': '2023-06-01',
+  };
+}
 
 interface InterfaceContract {
   type: 'rect' | 'circular';
@@ -47,8 +64,7 @@ async function callClaude(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-api-key': ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
+      ...getAuthHeaders(),
     },
     body: JSON.stringify({
       model: 'claude-sonnet-4-6',
