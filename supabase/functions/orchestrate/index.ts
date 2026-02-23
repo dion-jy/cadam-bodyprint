@@ -1,6 +1,8 @@
-import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
-import { corsHeaders } from '../_shared/cors.ts';
-import 'jsr:@std/dotenv/load';
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+};
 
 const ANTHROPIC_REFRESH_TOKEN = Deno.env.get('ANTHROPIC_REFRESH_TOKEN') ?? '';
 const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY') ?? '';
@@ -286,9 +288,9 @@ Deno.serve(async (req) => {
       );
     }
 
-    if (!ANTHROPIC_API_KEY) {
+    if (!ANTHROPIC_API_KEY && !ANTHROPIC_REFRESH_TOKEN) {
       return new Response(
-        JSON.stringify({ error: 'ANTHROPIC_API_KEY not configured' }),
+        JSON.stringify({ error: 'No API credentials configured (set ANTHROPIC_REFRESH_TOKEN or ANTHROPIC_API_KEY)' }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
       );
     }
