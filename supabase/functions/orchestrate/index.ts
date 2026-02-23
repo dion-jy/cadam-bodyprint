@@ -2,14 +2,51 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
 import { corsHeaders } from '../_shared/cors.ts';
 import 'jsr:@std/dotenv/load';
 
-const ANTHROPIC_OAUTH_TOKEN = Deno.env.get('ANTHROPIC_OAUTH_TOKEN') ?? '';
+const ANTHROPIC_REFRESH_TOKEN = Deno.env.get('ANTHROPIC_REFRESH_TOKEN') ?? '';
 const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY') ?? '';
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
+const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+const OAUTH_TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token';
+const OAUTH_HEADERS = {
+  'Content-Type': 'application/json',
+  'User-Agent': 'claude-cli/2.1.2 (external, cli)',
+  'x-app': 'cli',
+};
 
-function getAuthHeaders(): Record<string, string> {
-  if (ANTHROPIC_OAUTH_TOKEN) {
+// In-memory token cache (persists across requests within same Edge Function instance)
+let cachedAccessToken = Deno.env.get('ANTHROPIC_OAUTH_TOKEN') ?? '';
+let tokenExpiresAt = 0;
+
+async function getValidAccessToken(): Promise<string> {
+  const now = Date.now();
+  // Use cached token if still valid (5 min buffer)
+  if (cachedAccessToken && tokenExpiresAt > now + 5 * 60 * 1000) {
+    return cachedAccessToken;
+  }
+  if (!ANTHROPIC_REFRESH_TOKEN) return cachedAccessToken;
+
+  const res = await fetch(OAUTH_TOKEN_URL, {
+    method: 'POST',
+    headers: OAUTH_HEADERS,
+    body: JSON.stringify({
+      grant_type: 'refresh_token',
+      client_id: OAUTH_CLIENT_ID,
+      refresh_token: ANTHROPIC_REFRESH_TOKEN,
+    }),
+  });
+  if (!res.ok) throw new Error(`Token refresh failed: ${await res.text()}`);
+
+  const data = await res.json() as { access_token: string; expires_in: number };
+  cachedAccessToken = data.access_token;
+  tokenExpiresAt = now + data.expires_in * 1000;
+  return cachedAccessToken;
+}
+
+async function getAuthHeaders(): Promise<Record<string, string>> {
+  if (ANTHROPIC_REFRESH_TOKEN || cachedAccessToken) {
+    const token = await getValidAccessToken();
     return {
-      'Authorization': `Bearer ${ANTHROPIC_OAUTH_TOKEN}`,
+      'Authorization': `Bearer ${token}`,
       'anthropic-version': '2023-06-01',
       'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14',
       'user-agent': 'claude-cli/2.1.2 (external, cli)',
@@ -64,7 +101,7 @@ async function callClaude(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...getAuthHeaders(),
+      ...await getAuthHeaders(),
     },
     body: JSON.stringify({
       model: 'claude-sonnet-4-6',
