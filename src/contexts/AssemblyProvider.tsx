@@ -154,11 +154,42 @@ export function AssemblyProvider({
         // Render error — reset status and re-render
         updatePart(partName, { renderStatus: 'idle', renderError: undefined });
         await renderPart(partName);
+      } else if (part.error) {
+        // Code generation failed — re-run orchestrate and update this part
+        const prompt = stateRef.current.prompt;
+        if (!prompt) return;
+
+        updatePart(partName, { error: undefined, code: '', retries: 0 });
+
+        try {
+          const response = await orchestrateAssembly(prompt);
+          const regenerated = response.parts.find((p) => p.name === partName);
+          if (regenerated) {
+            updatePart(partName, {
+              code: regenerated.code,
+              error: regenerated.error,
+              retries: regenerated.retries,
+              renderStatus: 'idle',
+            });
+          } else {
+            updatePart(partName, {
+              error: 'Part not found in regenerated response',
+            });
+          }
+          // Update assembly preview with latest
+          setState((prev) => ({
+            ...prev,
+            assemblyPreview: response.assemblyPreview,
+          }));
+        } catch (error) {
+          updatePart(partName, {
+            error: error instanceof Error ? error.message : 'Regeneration failed',
+          });
+        }
       } else if (part.code && !part.error) {
         // Code exists, no error — just re-render
         await renderPart(partName);
       }
-      // TODO: If code generation failed (part.error), regenerate via orchestrate
     },
     [renderPart, updatePart],
   );
