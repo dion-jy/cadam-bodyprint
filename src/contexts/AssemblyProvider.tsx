@@ -150,13 +150,17 @@ export function AssemblyProvider({
       const part = stateRef.current.parts.find((p) => p.name === partName);
       if (!part) return;
 
-      // Re-generate the code through orchestrate with error context
-      // For now, just re-render if code exists
-      if (part.code && !part.error) {
+      if (part.renderStatus === 'error' && part.code) {
+        // Render error — reset status and re-render
+        updatePart(partName, { renderStatus: 'idle', renderError: undefined });
+        await renderPart(partName);
+      } else if (part.code && !part.error) {
+        // Code exists, no error — just re-render
         await renderPart(partName);
       }
+      // TODO: If code generation failed (part.error), regenerate via orchestrate
     },
-    [renderPart],
+    [renderPart, updatePart],
   );
 
   return (

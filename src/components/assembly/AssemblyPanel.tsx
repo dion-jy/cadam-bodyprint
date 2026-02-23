@@ -100,12 +100,10 @@ export function AssemblyPanel() {
                 size="sm"
                 variant="outline"
                 onClick={renderAllParts}
-                disabled={state.parts.every(
-                  (p) =>
-                    p.renderStatus === 'rendering' ||
-                    p.renderStatus === 'done' ||
-                    !!p.error,
-                )}
+                disabled={
+                  state.parts.some((p) => p.renderStatus === 'rendering') ||
+                  !state.parts.some((p) => p.code && !p.error && p.renderStatus !== 'done')
+                }
                 className="border-adam-neutral-700 text-xs"
               >
                 <Play className="mr-1 h-3 w-3" />
@@ -174,7 +172,7 @@ interface PartCardProps {
     error?: string;
     retries: number;
     stlBlob?: Blob;
-    renderStatus: string;
+    renderStatus: 'idle' | 'rendering' | 'done' | 'error';
     renderError?: string;
   };
   onRender: () => void;

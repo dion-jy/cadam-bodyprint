@@ -1,5 +1,5 @@
 import { useOpenSCAD } from '@/hooks/useOpenSCAD';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ThreeScene } from '@/components/viewer/ThreeScene';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { BufferGeometry } from 'three';
@@ -12,22 +12,33 @@ interface AssemblyViewerProps {
 export function AssemblyViewer({ code }: AssemblyViewerProps) {
   const { compileScad, isCompiling, output, isError, error } = useOpenSCAD();
   const [geometry, setGeometry] = useState<BufferGeometry | null>(null);
+  const [parseError, setParseError] = useState<string | null>(null);
+  const lastCodeRef = useRef<string>('');
 
   useEffect(() => {
-    if (code) {
+    if (code && code !== lastCodeRef.current) {
+      lastCodeRef.current = code;
+      setGeometry(null);
+      setParseError(null);
       compileScad(code);
     }
   }, [code, compileScad]);
 
   useEffect(() => {
     if (output && output instanceof Blob) {
+      let cancelled = false;
       output.arrayBuffer().then((buffer) => {
+        if (cancelled) return;
         const loader = new STLLoader();
         const geom = loader.parse(buffer);
         geom.center();
         geom.computeVertexNormals();
         setGeometry(geom);
+      }).catch((err) => {
+        if (cancelled) return;
+        setParseError(err instanceof Error ? err.message : 'Failed to parse STL');
       });
+      return () => { cancelled = true; };
     } else {
       setGeometry(null);
     }
@@ -39,13 +50,13 @@ export function AssemblyViewer({ code }: AssemblyViewerProps) {
         <div className="h-full w-full">
           <ThreeScene geometry={geometry} />
         </div>
-      ) : isError ? (
+      ) : (isError || parseError) ? (
         <div className="flex h-full flex-col items-center justify-center gap-3 p-6">
           <CircleAlert className="h-8 w-8 text-red-400" />
           <p className="text-sm text-red-300">Assembly preview failed to render</p>
-          {error && (
+          {(error || parseError) && (
             <p className="max-w-md text-center text-xs text-adam-text-secondary">
-              {error.message}
+              {parseError || error?.message}
             </p>
           )}
         </div>
