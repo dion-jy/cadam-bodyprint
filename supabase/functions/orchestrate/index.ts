@@ -169,6 +169,7 @@ function buildCodeGenPrompt(
   fullDescription: string,
 ): string {
   const interfaceDetails = Object.entries(part.interfaces).map(([position, iface]) => {
+    if (!iface) return `${position}: no interface defined`;
     const contract = contracts[iface.contract_ref];
     if (!contract) return `${position}: no contract found`;
     const dims = contract.type === 'circular'
