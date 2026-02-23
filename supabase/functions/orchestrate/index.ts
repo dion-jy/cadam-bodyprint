@@ -17,7 +17,8 @@ const OAUTH_HEADERS = {
 
 // In-memory token cache (persists across requests within same Edge Function instance)
 let cachedAccessToken = Deno.env.get('ANTHROPIC_OAUTH_TOKEN') ?? '';
-let tokenExpiresAt = 0;
+// If token loaded from env var, assume valid for 8h from startup; otherwise 0 = expired
+let tokenExpiresAt = cachedAccessToken ? Date.now() + 8 * 60 * 60 * 1000 : 0;
 
 async function getValidAccessToken(): Promise<string> {
   const now = Date.now();
