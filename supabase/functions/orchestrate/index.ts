@@ -290,9 +290,9 @@ Deno.serve(async (req) => {
       );
     }
 
-    if (!ANTHROPIC_API_KEY && !ANTHROPIC_REFRESH_TOKEN) {
+    if (!ANTHROPIC_API_KEY && !ANTHROPIC_REFRESH_TOKEN && !cachedAccessToken) {
       return new Response(
-        JSON.stringify({ error: 'No API credentials configured (set ANTHROPIC_REFRESH_TOKEN or ANTHROPIC_API_KEY)' }),
+        JSON.stringify({ error: 'No API credentials configured (set ANTHROPIC_OAUTH_TOKEN, ANTHROPIC_REFRESH_TOKEN, or ANTHROPIC_API_KEY)' }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
       );
     }
