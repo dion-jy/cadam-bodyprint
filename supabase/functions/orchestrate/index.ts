@@ -4,7 +4,6 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const ANTHROPIC_REFRESH_TOKEN = Deno.env.get('ANTHROPIC_REFRESH_TOKEN') ?? '';
 const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY') ?? '';
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
@@ -15,18 +14,58 @@ const OAUTH_HEADERS = {
   'x-app': 'cli',
 };
 
-// In-memory token cache (persists across requests within same Edge Function instance)
-let cachedAccessToken = Deno.env.get('ANTHROPIC_OAUTH_TOKEN') ?? '';
-// If token loaded from env var, assume valid for 8h from startup; otherwise 0 = expired
-let tokenExpiresAt = cachedAccessToken ? Date.now() + 8 * 60 * 60 * 1000 : 0;
+// Supabase config for token persistence
+const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
+const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+
+// In-memory cache (per Edge Function instance)
+let cachedAccessToken = '';
+let cachedRefreshToken = '';
+let tokenExpiresAt = 0;
+
+async function loadTokensFromDB(): Promise<void> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return;
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/oauth_tokens?id=eq.anthropic&select=access_token,refresh_token,expires_at`, {
+    headers: {
+      'apikey': SUPABASE_SERVICE_KEY,
+      'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+    },
+  });
+  if (!res.ok) return;
+  const rows = await res.json() as Array<{ access_token: string; refresh_token: string; expires_at: number }>;
+  if (rows.length > 0) {
+    cachedAccessToken = rows[0].access_token;
+    cachedRefreshToken = rows[0].refresh_token;
+    tokenExpiresAt = rows[0].expires_at;
+  }
+}
+
+async function saveTokensToDB(accessToken: string, refreshToken: string, expiresAt: number): Promise<void> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return;
+  await fetch(`${SUPABASE_URL}/rest/v1/oauth_tokens?id=eq.anthropic`, {
+    method: 'PATCH',
+    headers: {
+      'apikey': SUPABASE_SERVICE_KEY,
+      'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ access_token: accessToken, refresh_token: refreshToken, expires_at: expiresAt, updated_at: new Date().toISOString() }),
+  });
+}
 
 async function getValidAccessToken(): Promise<string> {
   const now = Date.now();
-  // Use cached token if still valid (5 min buffer)
+  // Use in-memory cache if valid (5 min buffer)
   if (cachedAccessToken && tokenExpiresAt > now + 5 * 60 * 1000) {
     return cachedAccessToken;
   }
-  if (!ANTHROPIC_REFRESH_TOKEN) return cachedAccessToken;
+  // Load from DB on cold start or cache miss
+  await loadTokensFromDB();
+  if (cachedAccessToken && tokenExpiresAt > now + 5 * 60 * 1000) {
+    return cachedAccessToken;
+  }
+  // Need to refresh
+  if (!cachedRefreshToken) return cachedAccessToken;
 
   const res = await fetch(OAUTH_TOKEN_URL, {
     method: 'POST',
@@ -34,27 +73,32 @@ async function getValidAccessToken(): Promise<string> {
     body: JSON.stringify({
       grant_type: 'refresh_token',
       client_id: OAUTH_CLIENT_ID,
-      refresh_token: ANTHROPIC_REFRESH_TOKEN,
+      refresh_token: cachedRefreshToken,
     }),
   });
   if (!res.ok) throw new Error(`Token refresh failed: ${await res.text()}`);
 
-  const data = await res.json() as { access_token: string; expires_in: number };
+  const data = await res.json() as { access_token: string; refresh_token: string; expires_in: number };
   cachedAccessToken = data.access_token;
+  cachedRefreshToken = data.refresh_token;  // save rotated refresh token
   tokenExpiresAt = now + data.expires_in * 1000;
+  // Persist new tokens to DB so they survive cold starts
+  await saveTokensToDB(cachedAccessToken, cachedRefreshToken, tokenExpiresAt);
   return cachedAccessToken;
 }
 
 async function getAuthHeaders(): Promise<Record<string, string>> {
-  if (ANTHROPIC_REFRESH_TOKEN || cachedAccessToken) {
+  if (SUPABASE_URL || cachedAccessToken) {
     const token = await getValidAccessToken();
-    return {
-      'Authorization': `Bearer ${token}`,
-      'anthropic-version': '2023-06-01',
-      'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14',
-      'user-agent': 'claude-cli/2.1.2 (external, cli)',
-      'x-app': 'cli',
-    };
+    if (token) {
+      return {
+        'Authorization': `Bearer ${token}`,
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14',
+        'user-agent': 'claude-cli/2.1.2 (external, cli)',
+        'x-app': 'cli',
+      };
+    }
   }
   return {
     'x-api-key': ANTHROPIC_API_KEY,
@@ -290,9 +334,9 @@ Deno.serve(async (req) => {
       );
     }
 
-    if (!ANTHROPIC_API_KEY && !ANTHROPIC_REFRESH_TOKEN && !cachedAccessToken) {
+    if (!ANTHROPIC_API_KEY && !SUPABASE_URL) {
       return new Response(
-        JSON.stringify({ error: 'No API credentials configured (set ANTHROPIC_OAUTH_TOKEN, ANTHROPIC_REFRESH_TOKEN, or ANTHROPIC_API_KEY)' }),
+        JSON.stringify({ error: 'No API credentials configured' }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
       );
     }
