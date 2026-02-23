@@ -11,6 +11,7 @@ import { cn } from '@/lib/utils';
 import { SelectedItemsContext } from '@/contexts/SelectedItemsContext';
 import { useSendContentMutation } from '@/services/messageService';
 import { generateConversationTitle } from '@/services/conversationService';
+import { Package, Pencil } from 'lucide-react';
 
 export function PromptView() {
   const navigate = useNavigate();
@@ -23,6 +24,7 @@ export function PromptView() {
   const [isLoaded, setIsLoaded] = useState(false);
   const [images, setImages] = useState<MessageItem[]>([]);
   const [meshUpload, setMeshUpload] = useState<MeshUploadState | null>(null);
+  const [isAssemblyMode, setIsAssemblyMode] = useState(false);
 
   const newConversationId = useMemo(() => {
     return crypto.randomUUID();
@@ -62,14 +64,16 @@ export function PromptView() {
 
   const { mutate: handleGenerate } = useMutation({
     mutationFn: async (content: Content) => {
-      // Create conversation immediately with 'New Conversation'
+      const assemblyMode = isAssemblyMode;
+
+      // Create conversation immediately
       const { data: conversation, error: conversationError } = await supabase
         .from('conversations')
         .insert([
           {
             id: newConversationId,
             user_id: user?.id ?? '',
-            title: 'New Conversation',
+            title: assemblyMode ? 'Assembly' : 'New Conversation',
           },
         ])
         .select()
@@ -77,38 +81,42 @@ export function PromptView() {
 
       if (conversationError) throw conversationError;
 
-      sendMessage(content);
+      if (!assemblyMode) {
+        sendMessage(content);
 
-      // Generate title in the background (don't await)
-      // Note: We don't need to check if a title exists because this is strictly for new conversations
-      // where the title is initialized to "New Conversation"
-      generateConversationTitle(conversation.id, content)
-        .then(async (title) => {
-          // Update conversation with generated title
-          await supabase
-            .from('conversations')
-            .update({ title })
-            .eq('id', conversation.id);
+        // Generate title in the background (don't await)
+        generateConversationTitle(conversation.id, content)
+          .then(async (title) => {
+            await supabase
+              .from('conversations')
+              .update({ title })
+              .eq('id', conversation.id);
 
-          // Invalidate queries to refresh UI
-          queryClient.invalidateQueries({ queryKey: ['conversations'] });
-          queryClient.invalidateQueries({
-            queryKey: ['conversation', conversation.id],
+            queryClient.invalidateQueries({ queryKey: ['conversations'] });
+            queryClient.invalidateQueries({
+              queryKey: ['conversation', conversation.id],
+            });
+          })
+          .catch((error) => {
+            console.error('Failed to generate title:', error);
           });
-        })
-        .catch((error) => {
-          console.error('Failed to generate title:', error);
-          // Don't show error to user, just log it
-        });
+      }
 
       return {
         conversationId: conversation.id,
         content: content,
+        assemblyMode,
       };
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['conversations'] });
-      navigate(`/editor/${data.conversationId}`);
+      if (data.assemblyMode) {
+        navigate(`/editor/${data.conversationId}`, {
+          state: { assemblyMode: true, initialPrompt: data.content.text },
+        });
+      } else {
+        navigate(`/editor/${data.conversationId}`);
+      }
     },
     onError: (error) => {
       console.error(error);
@@ -152,6 +160,34 @@ export function PromptView() {
                 isAuthModalVisible && 'xl:max-w-2xl',
               )}
             >
+              <div className="flex items-center justify-center mb-4">
+                <div className="flex items-center gap-1 rounded-lg border border-adam-neutral-700 bg-adam-neutral-950 p-0.5">
+                  <button
+                    onClick={() => setIsAssemblyMode(false)}
+                    className={cn(
+                      'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
+                      !isAssemblyMode
+                        ? 'bg-adam-blue text-white'
+                        : 'text-adam-text-secondary hover:text-adam-text-primary',
+                    )}
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                    Single Part
+                  </button>
+                  <button
+                    onClick={() => setIsAssemblyMode(true)}
+                    className={cn(
+                      'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
+                      isAssemblyMode
+                        ? 'bg-adam-blue text-white'
+                        : 'text-adam-text-secondary hover:text-adam-text-primary',
+                    )}
+                  >
+                    <Package className="h-3.5 w-3.5" />
+                    Assembly
+                  </button>
+                </div>
+              </div>
               <SelectedItemsContext.Provider
                 value={{ images, setImages, meshUpload, setMeshUpload }}
               >

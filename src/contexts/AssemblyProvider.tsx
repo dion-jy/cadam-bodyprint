@@ -1,4 +1,5 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import {
   AssemblyContext,
   AssemblyState,
@@ -29,9 +30,11 @@ export function AssemblyProvider({
   children,
   compileScadToBlob,
 }: AssemblyProviderProps) {
+  const location = useLocation();
   const [state, setState] = useState<AssemblyState>(initialState);
   const stateRef = useRef(state);
   stateRef.current = state;
+  const hasReadNavState = useRef(false);
 
   const updatePart = useCallback(
     (partName: string, updates: Partial<PartResult>) => {
@@ -88,6 +91,22 @@ export function AssemblyProvider({
     },
     [],
   );
+
+  // Read navigation state on mount to enable assembly mode from home screen
+  useEffect(() => {
+    if (hasReadNavState.current) return;
+    hasReadNavState.current = true;
+    const navState = location.state as {
+      assemblyMode?: boolean;
+      initialPrompt?: string;
+    } | null;
+    if (navState?.assemblyMode) {
+      setAssemblyMode(true);
+      if (navState.initialPrompt) {
+        generateAssembly(navState.initialPrompt);
+      }
+    }
+  }, [location.state, setAssemblyMode, generateAssembly]);
 
   const renderPart = useCallback(
     async (partName: string) => {
