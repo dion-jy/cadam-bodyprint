@@ -9,6 +9,8 @@ import { SelectedItemsContext } from '@/contexts/SelectedItemsContext';
 import { useConversation } from '@/services/conversationService';
 import { BlobContext } from '@/contexts/BlobContext';
 import { ColorContext } from '@/contexts/ColorContext';
+import { VersionHistoryContext } from '@/contexts/VersionHistoryContext';
+import { useVersionHistory } from '@/hooks/useVersionHistory';
 
 export default function EditorView() {
   const { id: conversationId } = useParams();
@@ -19,6 +21,7 @@ export default function EditorView() {
   const [color, setColor] = useState<string>('#00A6FF');
   const navigate = useNavigate();
   const { conversation, isConversationLoading } = useConversation();
+  const versionHistory = useVersionHistory(conversationId);
 
   useEffect(() => {
     if (!conversationId) {
@@ -55,7 +58,9 @@ export default function EditorView() {
           <SelectedItemsContext.Provider
             value={{ images, setImages, meshUpload, setMeshUpload }}
           >
-            <ParametricEditor />
+            <VersionHistoryContext.Provider value={versionHistory}>
+              <ParametricEditor />
+            </VersionHistoryContext.Provider>
           </SelectedItemsContext.Provider>
         </ColorContext.Provider>
       </BlobContext.Provider>
