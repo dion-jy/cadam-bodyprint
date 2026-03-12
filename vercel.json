@@ -1,6 +1,10 @@
 {
   "rewrites": [
     {
+      "source": "/supabase/:path*",
+      "destination": "https://lypojinzxwvmqwtunrot.supabase.co/:path*"
+    },
+    {
       "source": "/cadam",
       "destination": "/cadam/index.html"
     },
