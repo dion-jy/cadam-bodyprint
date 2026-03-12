@@ -25,6 +25,7 @@ export function PromptView() {
   const [images, setImages] = useState<MessageItem[]>([]);
   const [meshUpload, setMeshUpload] = useState<MeshUploadState | null>(null);
   const [isAssemblyMode, setIsAssemblyMode] = useState(false);
+  const isPromptReady = Boolean(user?.id) && !isLoading;
 
   const newConversationId = useMemo(() => {
     return crypto.randomUUID();
@@ -33,7 +34,6 @@ export function PromptView() {
   const { mutate: sendMessage } = useSendContentMutation({
     conversation: {
       id: newConversationId,
-      user_id: user?.id ?? '',
       current_message_leaf_id: null,
     },
   });
@@ -64,6 +64,10 @@ export function PromptView() {
 
   const { mutate: handleGenerate } = useMutation({
     mutationFn: async (content: Content) => {
+      if (!user?.id) {
+        throw new Error('Authentication is still initializing. Please retry.');
+      }
+
       const assemblyMode = isAssemblyMode;
 
       // Create conversation immediately
@@ -72,7 +76,7 @@ export function PromptView() {
         .insert([
           {
             id: newConversationId,
-            user_id: user?.id ?? '',
+            user_id: user.id,
             title: assemblyMode ? 'Assembly' : 'New Conversation',
           },
         ])
@@ -198,6 +202,7 @@ export function PromptView() {
                     user_id: user?.id ?? '',
                   }}
                   placeholder="Start building with Adam..."
+                  disabled={!isPromptReady}
                   model={model}
                   setModel={setModel}
                   showPromptGenerator={true}

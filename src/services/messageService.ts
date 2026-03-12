@@ -341,10 +341,7 @@ export function useParametricChatMutation({
 export function useSendContentMutation({
   conversation,
 }: {
-  conversation: Pick<
-    Conversation,
-    'id' | 'current_message_leaf_id' | 'user_id'
-  >;
+  conversation: Pick<Conversation, 'id' | 'current_message_leaf_id'>;
 }) {
   const { mutateAsync: insertMessageAsync } = useInsertMessageMutation();
 
