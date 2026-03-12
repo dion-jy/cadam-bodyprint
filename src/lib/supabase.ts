@@ -11,7 +11,7 @@ const isLocalHost =
 
 export const supabaseUrl =
   isBrowser && !isLocalHost
-    ? `${window.location.origin}/supabase`
+    ? `${window.location.origin}/api/supabase`
     : configuredSupabaseUrl;
 
 if (!supabaseUrl || !supabaseKey) {
