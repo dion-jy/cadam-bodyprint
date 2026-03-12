@@ -1,5 +1,5 @@
 import { useConversation } from '@/services/conversationService';
-import { getSupabaseFunctionUrl, supabase } from '@/lib/supabase';
+import { supabase } from '@/lib/supabase';
 import {
   Content,
   Conversation,
@@ -170,22 +170,25 @@ export function useParametricChatMutation({
       let initialized = false;
 
       // Start streaming request
-      const response = await fetch(getSupabaseFunctionUrl('chat'), {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${
-            (await supabase.auth.getSession()).data.session?.access_token
-          }`,
+      const response = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/chat`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${
+              (await supabase.auth.getSession()).data.session?.access_token
+            }`,
+          },
+          body: JSON.stringify({
+            conversationId,
+            messageId,
+            model,
+            newMessageId,
+            thinking,
+          }),
         },
-        body: JSON.stringify({
-          conversationId,
-          messageId,
-          model,
-          newMessageId,
-          thinking,
-        }),
-      });
+      );
 
       if (!response.ok) {
         throw new Error(
