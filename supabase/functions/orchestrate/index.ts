@@ -4,106 +4,13 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY') ?? '';
-const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
-const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
-const OAUTH_TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token';
-const OAUTH_HEADERS = {
-  'Content-Type': 'application/json',
-  'User-Agent': 'claude-cli/2.1.2 (external, cli)',
-  'x-app': 'cli',
-};
+type ProviderId = 'anthropic' | 'openai';
+type AuthMode = 'oauth' | 'api_key' | 'auto';
 
-// Supabase config for token persistence
-const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
-const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
-
-// In-memory cache (per Edge Function instance)
-let cachedAccessToken = '';
-let cachedRefreshToken = '';
-let tokenExpiresAt = 0;
-
-async function loadTokensFromDB(): Promise<void> {
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return;
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/oauth_tokens?id=eq.anthropic&select=access_token,refresh_token,expires_at`, {
-    headers: {
-      'apikey': SUPABASE_SERVICE_KEY,
-      'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
-    },
-  });
-  if (!res.ok) return;
-  const rows = await res.json() as Array<{ access_token: string; refresh_token: string; expires_at: number }>;
-  if (rows.length > 0) {
-    cachedAccessToken = rows[0].access_token;
-    cachedRefreshToken = rows[0].refresh_token;
-    tokenExpiresAt = rows[0].expires_at;
-  }
-}
-
-async function saveTokensToDB(accessToken: string, refreshToken: string, expiresAt: number): Promise<void> {
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return;
-  await fetch(`${SUPABASE_URL}/rest/v1/oauth_tokens?id=eq.anthropic`, {
-    method: 'PATCH',
-    headers: {
-      'apikey': SUPABASE_SERVICE_KEY,
-      'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ access_token: accessToken, refresh_token: refreshToken, expires_at: expiresAt, updated_at: new Date().toISOString() }),
-  });
-}
-
-async function getValidAccessToken(): Promise<string> {
-  const now = Date.now();
-  // Use in-memory cache if valid (5 min buffer)
-  if (cachedAccessToken && tokenExpiresAt > now + 5 * 60 * 1000) {
-    return cachedAccessToken;
-  }
-  // Load from DB on cold start or cache miss
-  await loadTokensFromDB();
-  if (cachedAccessToken && tokenExpiresAt > now + 5 * 60 * 1000) {
-    return cachedAccessToken;
-  }
-  // Need to refresh
-  if (!cachedRefreshToken) return cachedAccessToken;
-
-  const res = await fetch(OAUTH_TOKEN_URL, {
-    method: 'POST',
-    headers: OAUTH_HEADERS,
-    body: JSON.stringify({
-      grant_type: 'refresh_token',
-      client_id: OAUTH_CLIENT_ID,
-      refresh_token: cachedRefreshToken,
-    }),
-  });
-  if (!res.ok) throw new Error(`Token refresh failed: ${await res.text()}`);
-
-  const data = await res.json() as { access_token: string; refresh_token: string; expires_in: number };
-  cachedAccessToken = data.access_token;
-  cachedRefreshToken = data.refresh_token;  // save rotated refresh token
-  tokenExpiresAt = now + data.expires_in * 1000;
-  // Persist new tokens to DB so they survive cold starts
-  await saveTokensToDB(cachedAccessToken, cachedRefreshToken, tokenExpiresAt);
-  return cachedAccessToken;
-}
-
-async function getAuthHeaders(): Promise<Record<string, string>> {
-  if (SUPABASE_URL || cachedAccessToken) {
-    const token = await getValidAccessToken();
-    if (token) {
-      return {
-        'Authorization': `Bearer ${token}`,
-        'anthropic-version': '2023-06-01',
-        'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14',
-        'user-agent': 'claude-cli/2.1.2 (external, cli)',
-        'x-app': 'cli',
-      };
-    }
-  }
-  return {
-    'x-api-key': ANTHROPIC_API_KEY,
-    'anthropic-version': '2023-06-01',
-  };
+interface OAuthTokens {
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number;
 }
 
 interface InterfaceContract {
@@ -139,35 +46,389 @@ interface PartResult {
   retries: number;
 }
 
-async function callClaude(
-  systemPrompt: string,
-  userPrompt: string,
-  maxTokens = 4096,
-): Promise<string> {
-  const response = await fetch(ANTHROPIC_API_URL, {
+interface ProviderAdapter {
+  provider: ProviderId;
+  authMode: 'oauth' | 'api_key';
+  model: string;
+  callText(systemPrompt: string, userPrompt: string, maxTokens?: number): Promise<string>;
+}
+
+const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
+const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+
+const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
+const ANTHROPIC_DEFAULT_MODEL = Deno.env.get('ANTHROPIC_MODEL') ?? 'claude-sonnet-4-6';
+const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY') ?? '';
+const ANTHROPIC_MODE = normalizeAuthMode(Deno.env.get('ANTHROPIC_MODE'));
+const ANTHROPIC_OAUTH_TOKEN_URL = Deno.env.get('ANTHROPIC_OAUTH_TOKEN_URL') ?? 'https://console.anthropic.com/v1/oauth/token';
+const ANTHROPIC_OAUTH_CLIENT_ID = Deno.env.get('ANTHROPIC_OAUTH_CLIENT_ID') ?? '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+const ANTHROPIC_OAUTH_HEADERS = {
+  'Content-Type': 'application/json',
+  'User-Agent': 'claude-cli/2.1.2 (external, cli)',
+  'x-app': 'cli',
+};
+
+const OPENAI_API_URL = Deno.env.get('OPENAI_API_URL') ?? 'https://api.openai.com/v1/responses';
+const OPENAI_DEFAULT_MODEL = Deno.env.get('OPENAI_MODEL') ?? 'gpt-4.1';
+const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY') ?? '';
+const OPENAI_MODE = normalizeAuthMode(Deno.env.get('OPENAI_MODE'));
+const OPENAI_OAUTH_TOKEN_URL = Deno.env.get('OPENAI_OAUTH_TOKEN_URL') ?? '';
+const OPENAI_OAUTH_CLIENT_ID = Deno.env.get('OPENAI_OAUTH_CLIENT_ID') ?? '';
+const OPENAI_OAUTH_CLIENT_SECRET = Deno.env.get('OPENAI_OAUTH_CLIENT_SECRET') ?? '';
+
+const CADAM_LLM_PROVIDER = normalizeProvider(Deno.env.get('CADAM_LLM_PROVIDER'));
+
+const tokenCache: Partial<Record<ProviderId, OAuthTokens>> = {};
+
+function normalizeProvider(value: string | undefined): ProviderId {
+  return value?.toLowerCase() === 'openai' ? 'openai' : 'anthropic';
+}
+
+function normalizeAuthMode(value: string | undefined): AuthMode {
+  switch (value?.toLowerCase()) {
+    case 'oauth':
+      return 'oauth';
+    case 'api_key':
+      return 'api_key';
+    default:
+      return 'auto';
+  }
+}
+
+function getEnvOAuthTokens(provider: ProviderId): OAuthTokens {
+  const prefix = provider.toUpperCase();
+  const accessToken = Deno.env.get(`${prefix}_OAUTH_ACCESS_TOKEN`) ?? '';
+  const refreshToken = Deno.env.get(`${prefix}_OAUTH_REFRESH_TOKEN`) ?? '';
+  const expiresAtRaw = Deno.env.get(`${prefix}_OAUTH_EXPIRES_AT`) ?? '';
+  const expiresAt = Number.parseInt(expiresAtRaw, 10);
+  return {
+    accessToken,
+    refreshToken,
+    expiresAt: Number.isFinite(expiresAt) ? expiresAt : 0,
+  };
+}
+
+function hasOAuthCredentials(provider: ProviderId): boolean {
+  const envTokens = getEnvOAuthTokens(provider);
+  return Boolean(
+    envTokens.accessToken ||
+      envTokens.refreshToken ||
+      tokenCache[provider]?.accessToken,
+  );
+}
+
+async function loadTokensFromDB(provider: ProviderId): Promise<void> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return;
+
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/oauth_tokens?id=eq.${provider}&select=access_token,refresh_token,expires_at`,
+    {
+      headers: {
+        'apikey': SUPABASE_SERVICE_KEY,
+        'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+      },
+    },
+  );
+
+  if (!res.ok) return;
+
+  const rows = await res.json() as Array<{
+    access_token: string;
+    refresh_token: string;
+    expires_at: number;
+  }>;
+
+  if (rows.length === 0) return;
+
+  tokenCache[provider] = {
+    accessToken: rows[0].access_token,
+    refreshToken: rows[0].refresh_token,
+    expiresAt: rows[0].expires_at,
+  };
+}
+
+async function saveTokensToDB(provider: ProviderId, tokens: OAuthTokens): Promise<void> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return;
+
+  await fetch(`${SUPABASE_URL}/rest/v1/oauth_tokens?on_conflict=id`, {
     method: 'POST',
     headers: {
+      'apikey': SUPABASE_SERVICE_KEY,
+      'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
       'Content-Type': 'application/json',
-      ...await getAuthHeaders(),
+      'Prefer': 'resolution=merge-duplicates',
     },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-6',
-      max_tokens: maxTokens,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }],
-    }),
+    body: JSON.stringify([{
+      id: provider,
+      access_token: tokens.accessToken,
+      refresh_token: tokens.refreshToken,
+      expires_at: tokens.expiresAt,
+      updated_at: new Date().toISOString(),
+    }]),
+  });
+}
+
+async function refreshOAuthTokens(provider: ProviderId, refreshToken: string): Promise<OAuthTokens> {
+  if (provider === 'anthropic') {
+    if (!ANTHROPIC_OAUTH_CLIENT_ID) {
+      throw new Error('ANTHROPIC_OAUTH_CLIENT_ID is required for Anthropic OAuth refresh');
+    }
+
+    const res = await fetch(ANTHROPIC_OAUTH_TOKEN_URL, {
+      method: 'POST',
+      headers: ANTHROPIC_OAUTH_HEADERS,
+      body: JSON.stringify({
+        grant_type: 'refresh_token',
+        client_id: ANTHROPIC_OAUTH_CLIENT_ID,
+        refresh_token: refreshToken,
+      }),
+    });
+
+    if (!res.ok) {
+      throw new Error(`Anthropic token refresh failed: ${await res.text()}`);
+    }
+
+    const data = await res.json() as {
+      access_token: string;
+      refresh_token: string;
+      expires_in: number;
+    };
+
+    return {
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token || refreshToken,
+      expiresAt: Date.now() + data.expires_in * 1000,
+    };
+  }
+
+  if (!OPENAI_OAUTH_TOKEN_URL || !OPENAI_OAUTH_CLIENT_ID) {
+    throw new Error('OPENAI_OAUTH_TOKEN_URL and OPENAI_OAUTH_CLIENT_ID are required for OpenAI OAuth refresh');
+  }
+
+  const body: Record<string, string> = {
+    grant_type: 'refresh_token',
+    client_id: OPENAI_OAUTH_CLIENT_ID,
+    refresh_token: refreshToken,
+  };
+
+  if (OPENAI_OAUTH_CLIENT_SECRET) {
+    body.client_secret = OPENAI_OAUTH_CLIENT_SECRET;
+  }
+
+  const res = await fetch(OPENAI_OAUTH_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
   });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Anthropic API error: ${response.status} - ${errorText}`);
+  if (!res.ok) {
+    throw new Error(`OpenAI token refresh failed: ${await res.text()}`);
   }
 
-  const data = await response.json();
-  if (data.content && data.content.length > 0 && data.content[0].type === 'text') {
-    return data.content[0].text;
+  const data = await res.json() as {
+    access_token: string;
+    refresh_token?: string;
+    expires_in?: number;
+  };
+
+  return {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token || refreshToken,
+    expiresAt: Date.now() + (data.expires_in ?? 8 * 60 * 60) * 1000,
+  };
+}
+
+async function getOAuthAccessToken(provider: ProviderId): Promise<string> {
+  const now = Date.now();
+  const cached = tokenCache[provider];
+  if (cached?.accessToken && cached.expiresAt > now + 5 * 60 * 1000) {
+    return cached.accessToken;
   }
-  throw new Error('No text content in response');
+
+  await loadTokensFromDB(provider);
+  const loaded = tokenCache[provider];
+  if (loaded?.accessToken && loaded.expiresAt > now + 5 * 60 * 1000) {
+    return loaded.accessToken;
+  }
+
+  const envTokens = getEnvOAuthTokens(provider);
+  if (!tokenCache[provider]?.accessToken && envTokens.accessToken) {
+    tokenCache[provider] = envTokens;
+  } else if (!tokenCache[provider] && (envTokens.accessToken || envTokens.refreshToken)) {
+    tokenCache[provider] = envTokens;
+  }
+
+  const current = tokenCache[provider];
+  if (current?.accessToken && current.expiresAt > now + 5 * 60 * 1000) {
+    return current.accessToken;
+  }
+
+  if (!current?.refreshToken) {
+    return current?.accessToken ?? '';
+  }
+
+  const refreshed = await refreshOAuthTokens(provider, current.refreshToken);
+  tokenCache[provider] = refreshed;
+  await saveTokensToDB(provider, refreshed);
+  return refreshed.accessToken;
+}
+
+async function resolveProviderAuthMode(provider: ProviderId): Promise<'oauth' | 'api_key'> {
+  const configuredMode = provider === 'anthropic' ? ANTHROPIC_MODE : OPENAI_MODE;
+  if (configuredMode === 'oauth') return 'oauth';
+  if (configuredMode === 'api_key') return 'api_key';
+
+  await loadTokensFromDB(provider);
+
+  if (provider === 'anthropic') {
+    return hasOAuthCredentials('anthropic') ? 'oauth' : 'api_key';
+  }
+
+  return hasOAuthCredentials('openai') ? 'oauth' : 'api_key';
+}
+
+function extractOpenAIText(data: unknown): string {
+  if (typeof data !== 'object' || data === null) {
+    throw new Error('OpenAI response was not an object');
+  }
+
+  const response = data as {
+    output_text?: string;
+    output?: Array<{
+      content?: Array<{ type?: string; text?: string }>;
+    }>;
+  };
+
+  if (response.output_text) {
+    return response.output_text;
+  }
+
+  const text = response.output
+    ?.flatMap((item) => item.content ?? [])
+    .filter((item) => item.type === 'output_text' && typeof item.text === 'string')
+    .map((item) => item.text)
+    .join('');
+
+  if (text) {
+    return text;
+  }
+
+  throw new Error('No text content in OpenAI response');
+}
+
+async function createAnthropicAdapter(authMode: 'oauth' | 'api_key'): Promise<ProviderAdapter> {
+  if (authMode === 'api_key' && !ANTHROPIC_API_KEY) {
+    throw new Error('ANTHROPIC_API_KEY is required when ANTHROPIC_MODE=api_key');
+  }
+
+  return {
+    provider: 'anthropic',
+    authMode,
+    model: ANTHROPIC_DEFAULT_MODEL,
+    async callText(systemPrompt: string, userPrompt: string, maxTokens = 4096): Promise<string> {
+      const authHeaders =
+        authMode === 'oauth'
+          ? (() => getOAuthAccessToken('anthropic').then((token) => {
+            if (!token) {
+              throw new Error('Anthropic OAuth token is not configured');
+            }
+            return {
+              'Authorization': `Bearer ${token}`,
+              'anthropic-version': '2023-06-01',
+              'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14',
+              'user-agent': 'claude-cli/2.1.2 (external, cli)',
+              'x-app': 'cli',
+            };
+          }))()
+          : Promise.resolve({
+            'x-api-key': ANTHROPIC_API_KEY,
+            'anthropic-version': '2023-06-01',
+          });
+
+      const response = await fetch(ANTHROPIC_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(await authHeaders),
+        },
+        body: JSON.stringify({
+          model: ANTHROPIC_DEFAULT_MODEL,
+          max_tokens: maxTokens,
+          system: systemPrompt,
+          messages: [{ role: 'user', content: userPrompt }],
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Anthropic API error: ${response.status} - ${errorText}`);
+      }
+
+      const data = await response.json() as {
+        content?: Array<{ type?: string; text?: string }>;
+      };
+
+      if (data.content?.[0]?.type === 'text' && data.content[0].text) {
+        return data.content[0].text;
+      }
+
+      throw new Error('No text content in Anthropic response');
+    },
+  };
+}
+
+async function createOpenAIAdapter(authMode: 'oauth' | 'api_key'): Promise<ProviderAdapter> {
+  if (authMode === 'api_key' && !OPENAI_API_KEY) {
+    throw new Error('OPENAI_API_KEY is required when OPENAI_MODE=api_key');
+  }
+
+  return {
+    provider: 'openai',
+    authMode,
+    model: OPENAI_DEFAULT_MODEL,
+    async callText(systemPrompt: string, userPrompt: string, maxTokens = 4096): Promise<string> {
+      const token =
+        authMode === 'oauth'
+          ? await getOAuthAccessToken('openai')
+          : OPENAI_API_KEY;
+
+      if (!token) {
+        throw new Error('OpenAI credentials are not configured');
+      }
+
+      const response = await fetch(OPENAI_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          model: OPENAI_DEFAULT_MODEL,
+          instructions: systemPrompt,
+          input: userPrompt,
+          max_output_tokens: maxTokens,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`OpenAI API error: ${response.status} - ${errorText}`);
+      }
+
+      return extractOpenAIText(await response.json());
+    },
+  };
+}
+
+async function getProviderAdapter(): Promise<ProviderAdapter> {
+  const provider = CADAM_LLM_PROVIDER;
+  const authMode = await resolveProviderAuthMode(provider);
+
+  if (provider === 'openai') {
+    return createOpenAIAdapter(authMode);
+  }
+
+  return createAnthropicAdapter(authMode);
 }
 
 const DECOMPOSITION_SYSTEM_PROMPT = `You are an expert CAD engineer specializing in multi-part 3D printable assemblies.
@@ -260,12 +521,14 @@ The code must:
 Return ONLY the OpenSCAD code. No explanations, no markdown.`;
 
 async function generatePartCode(
+  adapter: ProviderAdapter,
   part: PartSpec,
   contracts: Record<string, InterfaceContract>,
   fullDescription: string,
   maxRetries = 3,
 ): Promise<PartResult> {
   let lastError = '';
+
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const userPrompt = attempt === 0
       ? buildCodeGenPrompt(part, contracts, fullDescription)
@@ -277,16 +540,14 @@ ${lastError}
 Fix the issue and regenerate the complete code.`;
 
     try {
-      let code = await callClaude(CODE_GEN_SYSTEM_PROMPT, userPrompt, 8192);
+      let code = await adapter.callText(CODE_GEN_SYSTEM_PROMPT, userPrompt, 8192);
 
-      // Strip markdown code blocks if the model wrapped them
       const codeBlockRegex = /^```(?:openscad)?\n?([\s\S]*?)\n?```$/;
       const match = code.match(codeBlockRegex);
       if (match) {
         code = match[1].trim();
       }
 
-      // Basic validation: must contain include and at least one geometric primitive
       if (!code.includes('include') && !code.includes('use')) {
         lastError = 'Generated code missing BOSL2 include statement';
         continue;
@@ -334,15 +595,9 @@ Deno.serve(async (req) => {
       );
     }
 
-    if (!ANTHROPIC_API_KEY && !SUPABASE_URL) {
-      return new Response(
-        JSON.stringify({ error: 'No API credentials configured' }),
-        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
-      );
-    }
+    const adapter = await getProviderAdapter();
 
-    // Step 1: Decompose into parts + interface contracts
-    const decompositionRaw = await callClaude(
+    const decompositionRaw = await adapter.callText(
       DECOMPOSITION_SYSTEM_PROMPT,
       prompt,
       4096,
@@ -350,7 +605,6 @@ Deno.serve(async (req) => {
 
     let decomposition: DecompositionResult;
     try {
-      // Try to extract JSON from the response (handle potential markdown wrapping)
       let jsonStr = decompositionRaw.trim();
       const jsonMatch = jsonStr.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
       if (jsonMatch) {
@@ -360,23 +614,21 @@ Deno.serve(async (req) => {
     } catch {
       return new Response(
         JSON.stringify({
-          error: 'Failed to parse decomposition',
+          error: `Failed to parse decomposition from ${adapter.provider}/${adapter.authMode}`,
           raw: decompositionRaw,
         }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
       );
     }
 
-    // Step 2: Generate code for each part (in parallel)
     const partResults = await Promise.all(
       decomposition.parts.map((part) =>
-        generatePartCode(part, decomposition.interface_contracts, prompt)
+        generatePartCode(adapter, part, decomposition.interface_contracts, prompt)
       ),
     );
 
-    // Step 3: Build combined assembly preview code
     let assemblyPreview = 'include <BOSL2/std.scad>\n\n';
-    assemblyPreview += '// Assembly preview — all parts stacked\n';
+    assemblyPreview += `// Assembly preview — provider=${adapter.provider} auth=${adapter.authMode}\n`;
     assemblyPreview += '$fn = 64;\n\n';
 
     let stackHeight = 0;
@@ -390,11 +642,8 @@ Deno.serve(async (req) => {
       stackHeight += part.dims.h;
     }
 
-    // Add module definitions
     for (const result of partResults) {
       if (result.code && !result.error) {
-        // Wrap each part's code in a module for assembly preview
-        // Strip the include line since we have it at the top
         const codeWithoutInclude = result.code
           .replace(/^\s*include\s*<[^>]+>\s*;?\s*\n/gm, '')
           .replace(/^\s*use\s*<[^>]+>\s*;?\s*\n/gm, '');
@@ -412,6 +661,9 @@ Deno.serve(async (req) => {
         decomposition,
         parts: partResults,
         assemblyPreview,
+        provider: adapter.provider,
+        authMode: adapter.authMode,
+        model: adapter.model,
       }),
       {
         status: 200,
