@@ -1,10 +1,6 @@
 {
   "rewrites": [
     {
-      "source": "/api/supabase/:path*",
-      "destination": "/api/supabase?path=:path*"
-    },
-    {
       "source": "/cadam",
       "destination": "/cadam/index.html"
     },
