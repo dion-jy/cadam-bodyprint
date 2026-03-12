@@ -12,7 +12,7 @@ import {
 } from 'react-resizable-panels';
 import { ChatSection } from '@/components/chat/ChatSection';
 import { Button } from '@/components/ui/button';
-import { ChevronsRight } from 'lucide-react';
+import { ChevronsRight, MessageSquare, GitBranch } from 'lucide-react';
 import { ViewerSection } from '@/components/viewer/ViewerSection';
 import { ParameterSection } from '@/components/parameter/ParameterSection';
 import { useBlob } from '@/contexts/BlobContext';
@@ -22,6 +22,11 @@ import { AssemblyPanel } from '@/components/assembly/AssemblyPanel';
 import { AssemblyToggle } from '@/components/assembly/AssemblyToggle';
 import { useAssembly } from '@/contexts/AssemblyContext';
 import { useAssemblyRenderer } from '@/hooks/useAssemblyRenderer';
+import { useAuth } from '@/contexts/AuthContext';
+import { useVersionHistoryContext } from '@/contexts/VersionHistoryContext';
+import { VersionPanel } from '@/components/history/VersionPanel';
+import { CompareViewer } from '@/components/viewer/CompareViewer';
+import { DiffView } from '@/components/history/DiffView';
 
 const PANEL_SIZES = {
   CHAT: {
@@ -50,15 +55,30 @@ export function ParametricEditor() {
   );
 }
 
+type LeftPanelTab = 'chat' | 'history';
+
 function ParametricEditorInner() {
   const { conversation } = useConversation();
   const { currentMessage, setCurrentMessage } = useCurrentMessage();
   const { setBlob } = useBlob();
   const { setColor } = useColor();
   const { state: assemblyState } = useAssembly();
+  const { user } = useAuth();
+  const {
+    versions,
+    selectedVersion,
+    selectVersion,
+    compareState,
+    compare,
+    clearCompare,
+    autoCommit,
+    isLoading: versionLoading,
+  } = useVersionHistoryContext();
+
   const [isParametersPanelCollapsed, setIsParametersPanelCollapsed] =
     useState(false);
   const [isChatCollapsed, setIsChatCollapsed] = useState(false);
+  const [leftPanelTab, setLeftPanelTab] = useState<LeftPanelTab>('chat');
   const chatPanelRef = useRef<ImperativePanelHandle>(null);
   const parameterPanelRef = useRef<ImperativePanelHandle>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
@@ -102,6 +122,62 @@ function ParametricEditorInner() {
       setCurrentMessage(lastMessage);
     }
   }, [lastMessage, setCurrentMessage]);
+
+  // Auto-commit when assistant generates code
+  useEffect(() => {
+    if (!lastMessage?.content.artifact?.code) return;
+    if (lastMessage.role !== 'assistant') return;
+
+    const code = lastMessage.content.artifact.code;
+
+    // Find the user message that triggered this response
+    const userMsg = currentMessageBranch.find(
+      (m) => m.id === lastMessage.parent_message_id,
+    );
+    const commitMsg =
+      userMsg?.content.text?.slice(0, 120) || 'Code update';
+
+    const authorName = user?.user_metadata?.full_name || user?.email || 'User';
+    const authorEmail = user?.email || 'user@cadam.app';
+
+    autoCommit(code, commitMsg, {
+      name: authorName,
+      email: authorEmail,
+    });
+  }, [lastMessage, currentMessageBranch, autoCommit, user]);
+
+  // Handle restore: when user restores a version, apply it to the current message
+  const handleRestore = useCallback(
+    (version: { code: string; message: string }) => {
+      if (!currentMessage?.content.artifact) return;
+
+      // Create updated message with restored code
+      const restoredMessage: Message = {
+        ...currentMessage,
+        content: {
+          ...currentMessage.content,
+          artifact: {
+            ...currentMessage.content.artifact,
+            code: version.code,
+          },
+        },
+      };
+      setCurrentMessage(restoredMessage);
+
+      // Auto-commit the restoration
+      const authorName =
+        user?.user_metadata?.full_name || user?.email || 'User';
+      const authorEmail = user?.email || 'user@cadam.app';
+      autoCommit(version.code, `Restored: ${version.message}`, {
+        name: authorName,
+        email: authorEmail,
+      });
+
+      // Clear selection
+      selectVersion(null);
+    },
+    [currentMessage, setCurrentMessage, autoCommit, user, selectVersion],
+  );
 
   // Update container width on resize
   const setContainerRef = useCallback((element: HTMLDivElement) => {
@@ -210,6 +286,7 @@ function ParametricEditorInner() {
   }, []);
 
   const showAssemblyPanel = assemblyState.isAssemblyMode;
+  const isComparing = !!compareState;
 
   return (
     <div
@@ -221,11 +298,11 @@ function ParametricEditorInner() {
         <AssemblyToggle />
       </div>
       <PanelGroup
-        key={`${hasArtifact ? 'with-params' : 'no-params'}-${showAssemblyPanel ? 'asm' : 'single'}`}
+        key={`${hasArtifact ? 'with-params' : 'no-params'}-${showAssemblyPanel ? 'asm' : 'single'}-${isComparing ? 'cmp' : 'norm'}`}
         direction="horizontal"
         className="h-full w-full"
       >
-        {/* Left panel: Chat (single mode) or Assembly Panel (assembly mode) */}
+        {/* Left panel: Chat/History (single mode) or Assembly Panel (assembly mode) */}
         <Panel
           collapsible
           ref={chatPanelRef}
@@ -235,11 +312,61 @@ function ParametricEditorInner() {
           id="chat-panel"
           order={0}
         >
-          <div className="relative h-full">
+          <div className="relative flex h-full flex-col">
             {showAssemblyPanel ? (
               <AssemblyPanel />
             ) : (
-              <ChatSection messages={currentMessageBranch ?? []} />
+              <>
+                {/* Tab switcher */}
+                <div className="flex border-b border-adam-neutral-700">
+                  <button
+                    onClick={() => setLeftPanelTab('chat')}
+                    className={`flex flex-1 items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors ${
+                      leftPanelTab === 'chat'
+                        ? 'border-b-2 border-adam-blue text-adam-blue'
+                        : 'text-adam-text-secondary hover:text-adam-text-primary'
+                    }`}
+                  >
+                    <MessageSquare className="h-3.5 w-3.5" />
+                    Chat
+                  </button>
+                  <button
+                    onClick={() => setLeftPanelTab('history')}
+                    className={`flex flex-1 items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors ${
+                      leftPanelTab === 'history'
+                        ? 'border-b-2 border-adam-blue text-adam-blue'
+                        : 'text-adam-text-secondary hover:text-adam-text-primary'
+                    }`}
+                  >
+                    <GitBranch className="h-3.5 w-3.5" />
+                    History
+                    {versions.length > 0 && (
+                      <span className="rounded-full bg-adam-neutral-700 px-1.5 text-[10px]">
+                        {versions.length}
+                      </span>
+                    )}
+                  </button>
+                </div>
+                {/* Tab content */}
+                {leftPanelTab === 'chat' ? (
+                  <div className="flex-1 overflow-hidden">
+                    <ChatSection messages={currentMessageBranch ?? []} />
+                  </div>
+                ) : (
+                  <div className="flex-1 overflow-hidden">
+                    <VersionPanel
+                      versions={versions}
+                      selectedVersion={selectedVersion}
+                      compareState={compareState}
+                      isLoading={versionLoading}
+                      onSelectVersion={selectVersion}
+                      onCompare={compare}
+                      onClearCompare={clearCompare}
+                      onRestore={handleRestore}
+                    />
+                  </div>
+                )}
+              </>
             )}
           </div>
         </Panel>
@@ -284,9 +411,32 @@ function ParametricEditorInner() {
           id="preview-panel"
           order={1}
         >
-          <ViewerSection />
+          {isComparing ? (
+            <div className="flex h-full flex-col">
+              {/* 3D Compare top half */}
+              <div className="flex-1">
+                <CompareViewer
+                  oldCode={compareState.oldCode}
+                  newCode={compareState.newCode}
+                  oldLabel={`v${versions.length - versions.findIndex((v) => v.oid === compareState.oldVersion.oid)}`}
+                  newLabel={`v${versions.length - versions.findIndex((v) => v.oid === compareState.newVersion.oid)}`}
+                />
+              </div>
+              {/* Code Diff bottom half */}
+              <div className="h-[40%] border-t border-adam-neutral-700">
+                <DiffView
+                  oldCode={compareState.oldCode}
+                  newCode={compareState.newCode}
+                  oldLabel={`v${versions.length - versions.findIndex((v) => v.oid === compareState.oldVersion.oid)}`}
+                  newLabel={`v${versions.length - versions.findIndex((v) => v.oid === compareState.newVersion.oid)}`}
+                />
+              </div>
+            </div>
+          ) : (
+            <ViewerSection />
+          )}
         </Panel>
-        {hasArtifact && (
+        {hasArtifact && !isComparing && (
           <>
             <PanelResizeHandle className="resize-handle group relative">
               {!isParametersPanelCollapsed && (
