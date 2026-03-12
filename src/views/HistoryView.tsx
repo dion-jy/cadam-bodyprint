@@ -37,15 +37,19 @@ export function HistoryView() {
 
   const conversationQuery = useQuery<HistoryConversation[]>({
     queryKey: ['conversations'],
-    enabled: !!user,
+    enabled: Boolean(user?.id),
     queryFn: async () => {
+      if (!user?.id) {
+        return [];
+      }
+
       const { data: conversationsData, error: conversationsError } =
         await supabase
           .from('conversations')
           .select(
             `*, first_message:messages(content), messagesCount:messages(count)`,
           )
-          .eq('user_id', user?.id ?? '')
+          .eq('user_id', user.id)
           .order('updated_at', { ascending: false })
           .order('created_at', { ascending: false })
           .limit(1, { referencedTable: 'first_message' });

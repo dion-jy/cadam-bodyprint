@@ -23,13 +23,18 @@ export function Sidebar({ isSidebarOpen }: SidebarProps) {
 
   const { data: recentConversations } = useQuery<Conversation[]>({
     queryKey: ['conversations', 'recent'],
+    enabled: Boolean(user?.id),
     initialData: [],
     queryFn: async () => {
+      if (!user?.id) {
+        return [];
+      }
+
       const { data: conversations, error } = await supabase
         .from('conversations')
         .select('*')
         .order('updated_at', { ascending: false })
-        .eq('user_id', user?.id ?? '')
+        .eq('user_id', user.id)
         .limit(10);
 
       if (error) throw error;
